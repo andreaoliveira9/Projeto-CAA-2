@@ -1,0 +1,45 @@
+{
+  "expected_value": 0.2209939806457467,
+  "top_features": [
+    {
+      "Feature": "time",
+      "SHAP_Importance": 0.17966626716071254
+    },
+    {
+      "Feature": "cd420",
+      "SHAP_Importance": 0.04073223961577648
+    },
+    {
+      "Feature": "offtrt",
+      "SHAP_Importance": 0.02927311249424715
+    },
+    {
+      "Feature": "preanti",
+      "SHAP_Importance": 0.01779122677551296
+    },
+    {
+      "Feature": "symptom",
+      "SHAP_Importance": 0.008220626266592349
+    },
+    {
+      "Feature": "cd80",
+      "SHAP_Importance": 0.007749084914230539
+    },
+    {
+      "Feature": "cd40",
+      "SHAP_Importance": 0.006915454412333951
+    },
+    {
+      "Feature": "strat",
+      "SHAP_Importance": 0.006875019932166715
+    },
+    {
+      "Feature": "race",
+      "SHAP_Importance": 0.0043173940257894275
+    },
+    {
+      "Feature": "cd820",
+      "SHAP_Importance": 0.0035866698237993744
+    }
+  ]
+}
