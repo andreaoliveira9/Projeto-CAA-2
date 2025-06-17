@@ -1,45 +1,45 @@
 {
-  "expected_value": 0.2209939806457467,
+  "expected_value": 0.2266769876822225,
   "top_features": [
     {
       "Feature": "time",
-      "SHAP_Importance": 0.17966626716071254
+      "SHAP_Importance": 0.1787859604622408
     },
     {
       "Feature": "cd420",
-      "SHAP_Importance": 0.04073223961577648
+      "SHAP_Importance": 0.04240808044881657
     },
     {
       "Feature": "offtrt",
-      "SHAP_Importance": 0.02927311249424715
+      "SHAP_Importance": 0.029411602994474765
     },
     {
       "Feature": "preanti",
-      "SHAP_Importance": 0.01779122677551296
-    },
-    {
-      "Feature": "symptom",
-      "SHAP_Importance": 0.008220626266592349
-    },
-    {
-      "Feature": "cd80",
-      "SHAP_Importance": 0.007749084914230539
-    },
-    {
-      "Feature": "cd40",
-      "SHAP_Importance": 0.006915454412333951
+      "SHAP_Importance": 0.016445699842714025
     },
     {
       "Feature": "strat",
-      "SHAP_Importance": 0.006875019932166715
+      "SHAP_Importance": 0.008389946661663868
+    },
+    {
+      "Feature": "symptom",
+      "SHAP_Importance": 0.007888162179863044
+    },
+    {
+      "Feature": "cd40",
+      "SHAP_Importance": 0.006757947579978787
+    },
+    {
+      "Feature": "cd80",
+      "SHAP_Importance": 0.006710257875173681
     },
     {
       "Feature": "race",
-      "SHAP_Importance": 0.0043173940257894275
+      "SHAP_Importance": 0.005796099929929427
     },
     {
-      "Feature": "cd820",
-      "SHAP_Importance": 0.0035866698237993744
+      "Feature": "z30",
+      "SHAP_Importance": 0.005726727138182821
     }
   ]
 }
