@@ -1,0 +1,45 @@
+{
+  "expected_value": 0.23187639145514877,
+  "top_features": [
+    {
+      "Feature": "cd420",
+      "SHAP_Importance": 0.08652129347178932
+    },
+    {
+      "Feature": "preanti",
+      "SHAP_Importance": 0.017903708922618007
+    },
+    {
+      "Feature": "cd40",
+      "SHAP_Importance": 0.014244842342290375
+    },
+    {
+      "Feature": "symptom",
+      "SHAP_Importance": 0.012582608470818192
+    },
+    {
+      "Feature": "karnof",
+      "SHAP_Importance": 0.01222554374847665
+    },
+    {
+      "Feature": "trt",
+      "SHAP_Importance": 0.01203473796328865
+    },
+    {
+      "Feature": "wtkg",
+      "SHAP_Importance": 0.011277571730064988
+    },
+    {
+      "Feature": "cd80",
+      "SHAP_Importance": 0.010153899055655002
+    },
+    {
+      "Feature": "age",
+      "SHAP_Importance": 0.009395234279436143
+    },
+    {
+      "Feature": "treat",
+      "SHAP_Importance": 0.009303350133382534
+    }
+  ]
+}
