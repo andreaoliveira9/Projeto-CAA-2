@@ -99,7 +99,7 @@ This project requires:
 ## Project Structure
 
 ```
-random_forest/
+structured_data/
 ├── 1_data_preprocessing.py
 ├── 2_model_training.py
 ├── 3_xai_methods.py
