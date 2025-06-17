@@ -3,43 +3,43 @@
   "top_features": [
     {
       "Feature": "time",
-      "SHAP_Importance": 0.1787859604622408
+      "SHAP_Importance": 0.17883897055510384
     },
     {
       "Feature": "cd420",
-      "SHAP_Importance": 0.04240808044881657
+      "SHAP_Importance": 0.04248869423777012
     },
     {
       "Feature": "offtrt",
-      "SHAP_Importance": 0.029411602994474765
+      "SHAP_Importance": 0.028694369983164245
     },
     {
       "Feature": "preanti",
-      "SHAP_Importance": 0.016445699842714025
+      "SHAP_Importance": 0.016230045503085516
     },
     {
       "Feature": "strat",
-      "SHAP_Importance": 0.008389946661663868
+      "SHAP_Importance": 0.008328489232860663
     },
     {
       "Feature": "symptom",
-      "SHAP_Importance": 0.007888162179863044
-    },
-    {
-      "Feature": "cd40",
-      "SHAP_Importance": 0.006757947579978787
+      "SHAP_Importance": 0.008279771137383027
     },
     {
       "Feature": "cd80",
-      "SHAP_Importance": 0.006710257875173681
+      "SHAP_Importance": 0.006337987274289365
     },
     {
-      "Feature": "race",
-      "SHAP_Importance": 0.005796099929929427
+      "Feature": "cd40",
+      "SHAP_Importance": 0.006083797451674086
     },
     {
       "Feature": "z30",
-      "SHAP_Importance": 0.005726727138182821
+      "SHAP_Importance": 0.005530763741579416
+    },
+    {
+      "Feature": "race",
+      "SHAP_Importance": 0.005527607341478574
     }
   ]
 }
