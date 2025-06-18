@@ -1,1 +1,5 @@
 venv
+
+# dont include png and jpg files
+*.png
+*.jpg
