@@ -1,4 +1,5 @@
 venv
+.DS_Store
 
 # dont include png and jpg files
 *.png
