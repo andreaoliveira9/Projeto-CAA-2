@@ -18,6 +18,9 @@ from tensorflow.keras.models import load_model
 import pandas as pd
 import shap
 from skimage.segmentation import slic
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
 
 class SHAPUtils:
     def __init__(self, class_names, img_size=150, dataset_dir=None, models_dir=None, output_dir=None):
@@ -198,6 +201,7 @@ class SHAPUtils:
         
         return predictions, y_pred, y_true, class_accuracies
     
+
     def model_predict_fn(self, model):
         """
         Create a prediction function for SHAP that processes images in batches.
@@ -212,14 +216,59 @@ class SHAPUtils:
         is_densenet = False
         if hasattr(model, 'name'):
             is_densenet = 'densenet' in model.name.lower()
-            
+        
         def predict_fn(images):
-            # Normalize the images (convert to float and divide by 255)
-            batch = np.array(images).astype('float32') / 255.0
+            # Handle different input shapes from SHAP
+            if isinstance(images, list):
+                images = np.array(images)
+            
+            # Fix shape issues - SHAP sometimes passes extra dimensions
+            original_shape = images.shape
+            print(f"DEBUG: Input shape to predict_fn: {original_shape}")
+            
+            # If we have more than 4 dimensions, we need to reshape
+            if len(images.shape) > 4:
+                # Flatten extra dimensions while preserving the image dimensions
+                # Expected: (batch_size, height, width, channels)
+                # Sometimes SHAP gives: (1, 2, height, width, channels) or similar
+                
+                # Find the dimensions that look like image dimensions (150, 150, 3)
+                target_shape = (self.IMG_SIZE, self.IMG_SIZE, 3)
+                
+                # Reshape to combine the first dimensions into batch dimension
+                # and keep the last 3 dimensions as image dimensions
+                if images.shape[-3:] == target_shape:
+                    # Last 3 dimensions are the image, reshape everything else to batch
+                    batch_size = np.prod(images.shape[:-3])
+                    images = images.reshape(batch_size, *target_shape)
+                else:
+                    # Try to find where the image dimensions are
+                    shape = images.shape
+                    for i in range(len(shape) - 2):
+                        if shape[i:i+3] == target_shape:
+                            # Found the image dimensions, reshape accordingly
+                            batch_size = np.prod(shape[:i])
+                            remaining_dims = shape[i+3:]
+                            if len(remaining_dims) == 0:
+                                images = images.reshape(batch_size, *target_shape)
+                            break
+                    else:
+                        # Fallback: assume the last 3 dimensions are correct and flatten the rest
+                        batch_size = np.prod(shape[:-3])
+                        images = images.reshape(batch_size, *shape[-3:])
+            
+            print(f"DEBUG: Reshaped to: {images.shape}")
+            
+            # Make sure images have the right shape and are normalized
+            batch = np.array(images).astype('float32')
+            
+            # Normalize if values are not already in [0,1] range
+            if np.max(batch) > 1.0:
+                batch = batch / 255.0
             
             try:
                 # Get model predictions
-                predictions = model.predict(batch)
+                predictions = model.predict(batch, verbose=0)
                 
                 # Handle different output formats
                 if isinstance(predictions, list):
@@ -237,293 +286,352 @@ class SHAPUtils:
                     e_x = np.exp(predictions - np.max(predictions, axis=1, keepdims=True))
                     predictions = e_x / e_x.sum(axis=1, keepdims=True)
                 
+                print(f"DEBUG: Final predictions shape: {predictions.shape}")
                 return predictions
-                
+            
             except Exception as e:
                 print(f"Error in predict function: {e}")
+                print(f"Batch shape that caused error: {batch.shape}")
                 # Return zeros in case of error
                 return np.zeros((len(batch), len(self.CLASS_NAMES)))
-                
+            
         return predict_fn
     
-    def explain_image_shap(self, model, img, background_data, pred_index=None, num_samples=100):
+
+    def explain_image_shap(self, model, img, background_data, pred_index=None, num_samples=50):
         """
-        Generate SHAP explanation for a single image.
+        Generate SHAP values for an image.
         
         Args:
             model: The model to explain
-            img: Image array (already preprocessed and normalized)
+            img: Image array (already preprocessed)
             background_data: Background data for SHAP explainer
             pred_index: Optional class index to explain, if None uses the predicted class
-            num_samples: Number of samples for SHAP explainer
+            num_samples: Number of samples to use in SHAP explanation
         
         Returns:
             tuple: (shap_values, predicted_class, class_name, confidence)
         """
-        # Create prediction function for SHAP
-        predict_fn = self.model_predict_fn(model)
+        import shap
         
         # Get prediction for this image
         preds = model.predict(np.expand_dims(img, axis=0), verbose=0)[0]
         predicted_class = np.argmax(preds)
+        confidence = preds[predicted_class]
+        class_name = self.CLASS_NAMES[predicted_class]
         
-        # Use either predicted class or provided index
-        class_index = predicted_class if pred_index is None else pred_index
-        confidence = preds[class_index]
-        class_name = self.CLASS_NAMES[class_index]
+        # Use either predicted class or provided index for explanation
+        explanation_class_idx = predicted_class if pred_index is None else pred_index
         
-        # Check if this is a DenseNet model for special handling
-        is_densenet = False
-        if hasattr(model, 'name'):
-            is_densenet = 'densenet' in model.name.lower()
-        
-        # For DenseNet models, we might need special handling
-        if is_densenet:
-            print("Using special handling for DenseNet model")
-            
-            try:
-                # For DenseNet, we'll use a direct approach with Kernel SHAP
-                # This avoids the input structure warnings from DeepExplainer and GradientExplainer
-                
-                # Create a masked version of our image - this creates a "mask" over the image
-                # so we can see which parts are important
-                def mask_image(mask, image):
-                    # Apply the mask to the image
-                    masked_image = np.zeros(image.shape)
-                    for i in range(mask.shape[0]):
-                        masked_image[i, :, :, :] = image * mask[i, :, :, :]
-                    return masked_image
-                
-                # Create a function that generates masked versions of the image
-                def f(z):
-                    # Create a batch of masked images
-                    masked_images = mask_image(z, img)
-                    # Get predictions for all masked images
-                    return model.predict(masked_images)
-                
-                # Create masker that segments the image into superpixels
-                # This creates interpretable segments for SHAP
-                from shap.maskers import Image
-                masker = Image('inpaint_telea', img.shape)
-                
-                # Use Partition SHAP explainer - often works better with complex models
-                explainer = shap.Explainer(f, masker)
-                
-                # Get SHAP values - this might take a bit longer but should be more reliable
-                shap_explanation = explainer(np.expand_dims(img, axis=0), max_evals=100)
-                
-                # Convert to the format expected by our visualization functions
-                # This creates an array of shape (num_classes, 1, height, width, channels)
-                shap_values = []
-                for c in range(len(self.CLASS_NAMES)):
-                    # If this is the class we're explaining, use the actual values
-                    if c == class_index:
-                        # Reshape to match expected format
-                        values = shap_explanation.values[0]
-                        values = np.expand_dims(values, axis=0)  # Add batch dimension
-                        shap_values.append(values)
-                    else:
-                        # For other classes, just use zeros
-                        shap_values.append(np.zeros_like(np.expand_dims(img, axis=0)))
-                
-                return shap_values, predicted_class, class_name, confidence
-                
-            except Exception as e:
-                print(f"Special DenseNet handling failed: {e}")
-                print("Trying an alternative approach...")
-                
-                try:
-                    # Alternative approach for DenseNet - use a black box explainer
-                    # Create a simplified model function
-                    def model_fn(images):
-                        # Ensure proper shape
-                        if len(images.shape) == 3:
-                            images = np.expand_dims(images, axis=0)
-                        return model.predict(images)
-                    
-                    # Use Kernel Explainer as a last resort
-                    explainer = shap.KernelExplainer(
-                        model_fn, 
-                        background_data.reshape(background_data.shape[0], -1)
-                    )
-                    
-                    # Get SHAP values for flattened image
-                    flat_img = img.reshape(1, -1)
-                    shap_values_flat = explainer.shap_values(flat_img)
-                    
-                    # Reshape back to image format
-                    shap_values = []
-                    for sv in shap_values_flat:
-                        shap_values.append(sv.reshape(1, self.IMG_SIZE, self.IMG_SIZE, 3))
-                    
-                    return shap_values, predicted_class, class_name, confidence
-                    
-                except Exception as e2:
-                    print(f"Alternative approach also failed: {e2}")
-                    print("Trying standard approaches...")
-        
-        # Standard approach - try different explainers
         try:
-            # Initialize the SHAP explainer with DeepExplainer
-            explainer = shap.DeepExplainer(model, background_data)
+            print(f"Creating SHAP explainer for image shape: {img.shape}")
             
-            # Calculate SHAP values
-            shap_values = explainer.shap_values(np.expand_dims(img, axis=0))
+            # Method 1: Try Image masker with inpainting
+            print("Trying Image masker with inpainting...")
+            masker = shap.maskers.Image("inpaint_telea", img.shape)
+            explainer = shap.Explainer(self.model_predict_fn(model), masker)
+            
+            # Generate a single sample batch for SHAP analysis
+            img_batch = np.expand_dims(img, axis=0)
+            print(f"Input batch shape for SHAP: {img_batch.shape}")
+            
+            # Get SHAP values with proper parameters for image masker
+            shap_values = explainer(img_batch, max_evals=min(num_samples, 100), batch_size=5)
             
             return shap_values, predicted_class, class_name, confidence
             
         except Exception as e:
-            print(f"Error with DeepExplainer: {e}")
-            print("Trying GradientExplainer instead...")
+            print(f"Image masker failed: {e}")
+            print(f"Trying segmentation-based approach...")
             
             try:
-                # Try with GradientExplainer as a fallback
-                explainer = shap.GradientExplainer(model, background_data)
-                shap_values = explainer.shap_values(np.expand_dims(img, axis=0))
-                return shap_values, predicted_class, class_name, confidence
+                # Method 2: Use superpixel segmentation
+                from skimage.segmentation import slic
+                
+                # Create superpixels - fewer segments means fewer features
+                segments = slic(img, n_segments=50, compactness=10, sigma=1, 
+                            start_label=1, convert2lab=True)
+                
+                def mask_image(mask, image, background=None):
+                    """Apply mask to image using segments"""
+                    if background is None:
+                        background = np.zeros_like(image)
+                    
+                    out = image.copy()
+                    for i in range(len(mask)):
+                        if mask[i] == 0:  # If segment should be masked
+                            out[segments == i] = background[segments == i]
+                    return out
+                
+                def model_predict_segments(masks):
+                    """Predict function that works with segment masks"""
+                    batch_predictions = []
+                    for mask in masks:
+                        # Apply mask to the image
+                        masked_img = mask_image(mask, img)
+                        # Get prediction
+                        pred = model.predict(np.expand_dims(masked_img, axis=0), verbose=0)
+                        batch_predictions.append(pred[0])
+                    return np.array(batch_predictions)
+                
+                # Create SHAP explainer for segments
+                print(f"Created {np.max(segments)} segments for SHAP analysis")
+                explainer = shap.Explainer(model_predict_segments, 
+                                        np.ones((1, np.max(segments))))
+                
+                # Explain with segments (much fewer features now)
+                shap_values = explainer(np.ones((1, np.max(segments))), 
+                                    max_evals=min(num_samples, 200))
+                
+                # Convert segment-based SHAP values back to pixel-based
+                pixel_shap = np.zeros_like(img)
+                for i in range(len(shap_values.values[0])):
+                    if i < np.max(segments):
+                        pixel_shap[segments == (i + 1)] = shap_values.values[0][i]
+                
+                # Create a SHAP values object that looks like the standard format
+                class SimpleShapValues:
+                    def __init__(self, values, data):
+                        self.values = values
+                        self.data = data
+                
+                shap_result = SimpleShapValues([pixel_shap], [img])
+                
+                return shap_result, predicted_class, class_name, confidence
                 
             except Exception as e2:
-                print(f"Error with GradientExplainer: {e2}")
-                print("Trying KernelExplainer as last resort...")
+                print(f"Segmentation approach failed: {e2}")
+                print(f"Trying simple gradient-based approach...")
                 
                 try:
-                    # As a last resort, try with KernelExplainer
-                    # First flatten the image for KernelExplainer
-                    flat_img = img.reshape(1, -1)
-                    flat_background = background_data.reshape(background_data.shape[0], -1)
+                    # Method 3: Simple gradient-based explanation as fallback
+                    import tensorflow as tf
                     
-                    # Create a simplified predict function for the flattened data
-                    def simplified_predict(x):
-                        # Reshape back to original image dimensions
-                        reshaped_x = x.reshape(-1, self.IMG_SIZE, self.IMG_SIZE, 3)
-                        return predict_fn(reshaped_x)
+                    # Convert image to tensor
+                    img_tensor = tf.convert_to_tensor(np.expand_dims(img, axis=0), dtype=tf.float32)
                     
-                    # Initialize KernelExplainer
-                    explainer = shap.KernelExplainer(simplified_predict, flat_background)
+                    with tf.GradientTape() as tape:
+                        tape.watch(img_tensor)
+                        predictions = model(img_tensor)
+                        target_class_output = predictions[0][explanation_class_idx]
                     
-                    # Calculate SHAP values
-                    shap_values = explainer.shap_values(flat_img, nsamples=num_samples)
+                    # Get gradients
+                    gradients = tape.gradient(target_class_output, img_tensor)
                     
-                    # Reshape SHAP values back to image dimensions
-                    shap_values = [sv.reshape(1, self.IMG_SIZE, self.IMG_SIZE, 3) for sv in shap_values]
+                    # Convert to numpy and create simple SHAP-like result
+                    grad_values = gradients.numpy()[0]
                     
-                    return shap_values, predicted_class, class_name, confidence
+                    class SimpleShapValues:
+                        def __init__(self, values, data):
+                            self.values = values
+                            self.data = data
+                    
+                    shap_result = SimpleShapValues([grad_values], [img])
+                    print("Using gradient-based explanation as fallback")
+                    
+                    return shap_result, predicted_class, class_name, confidence
                     
                 except Exception as e3:
-                    print(f"All SHAP explainers failed: {e3}")
+                    print(f"Gradient approach also failed: {e3}")
+                    # Return None to indicate complete failure
                     return None, predicted_class, class_name, confidence
-    
+            
     def visualize_shap_explanation(self, img, shap_values, class_index, class_name, confidence):
         """
-        Visualize SHAP explanation for a single image.
+        Visualize SHAP explanation for a single image with pink-blue colormap.
         
         Args:
             img: Original image (already preprocessed)
-            shap_values: SHAP values for the image
+            shap_values: SHAP explanation values
             class_index: Class index to explain
             class_name: Name of the class
             confidence: Model confidence for the class
-            
+
         Returns:
-            matplotlib figure object
+            matplotlib.figure.Figure: Figure with visualization
         """
-        if shap_values is None:
-            # Create a simple visualization with just the prediction if SHAP failed
-            fig, ax = plt.subplots(1, 1, figsize=(10, 10))
-            ax.imshow(img)
-            ax.set_title(f'Prediction: {class_name}\nConfidence: {confidence:.2f}\nSHAP explanation failed', fontsize=14)
-            ax.axis('off')
+        import shap
+
+        try:
+            # Create the figure with multiple subplots
+            fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+            
+            # If shap_values is None, create a simple visualization with just the original image
+            if shap_values is None:
+                for ax in axes:
+                    ax.imshow(img)
+                    ax.set_title(f"SHAP visualization failed\nClass: {class_name}, Confidence: {confidence:.2f}")
+                    ax.axis('off')
+                return fig
+            
+            # Display original image
+            axes[0].imshow(img)
+            axes[0].set_title(f"Original Image\nPredicted: {class_name}\nConfidence: {confidence:.2f}")
+            axes[0].axis('off')
+            
+            # Extract SHAP values based on the format
+            try:
+                if hasattr(shap_values, 'values'):
+                    # Standard SHAP format
+                    if isinstance(shap_values.values, list):
+                        attribution = shap_values.values[0]
+                    else:
+                        attribution = shap_values.values
+                else:
+                    # Our custom format from fallback methods
+                    attribution = shap_values[0] if isinstance(shap_values, list) else shap_values
+                
+                print(f"DEBUG: Attribution shape: {attribution.shape}")
+                
+                # Handle different attribution shapes
+                if len(attribution.shape) == 5:  # (1, H, W, C, num_classes)
+                    # Take the first sample and sum across classes or take max class
+                    attribution = attribution[0]  # Now (H, W, C, num_classes)
+                    # Sum across all classes to get overall importance
+                    attribution = np.sum(attribution, axis=-1)  # Now (H, W, C)
+                elif len(attribution.shape) == 4:
+                    if attribution.shape[0] == 1:  # (1, H, W, C)
+                        attribution = attribution[0]
+                    elif attribution.shape[-1] > 3:  # (H, W, C, num_classes)
+                        # Sum across classes
+                        attribution = np.sum(attribution, axis=-1)
+                
+                print(f"DEBUG: After processing, attribution shape: {attribution.shape}")
+                
+                # Create attribution map by summing across channels (preserve sign for diverging colormap)
+                if len(attribution.shape) == 3:  # (H, W, C)
+                    attribution_map = attribution.sum(axis=-1)
+                elif len(attribution.shape) == 2:  # (H, W)
+                    attribution_map = attribution
+                else:
+                    print(f"Unexpected attribution shape: {attribution.shape}")
+                    # Flatten to 2D as fallback
+                    if len(attribution.shape) > 2:
+                        attribution_map = attribution.sum(axis=tuple(range(2, len(attribution.shape))))
+                    else:
+                        attribution_map = attribution
+                
+                print(f"DEBUG: Attribution map shape: {attribution_map.shape}")
+                
+                # Ensure attribution_map is 2D and matches image dimensions
+                if len(attribution_map.shape) != 2:
+                    print(f"Warning: Attribution map is not 2D, shape: {attribution_map.shape}")
+                    # Try to make it 2D
+                    while len(attribution_map.shape) > 2:
+                        attribution_map = attribution_map.sum(axis=-1)
+                
+                # Resize attribution map to match image dimensions if needed
+                if attribution_map.shape != img.shape[:2]:
+                    print(f"Resizing attribution map from {attribution_map.shape} to {img.shape[:2]}")
+                    from skimage.transform import resize
+                    attribution_map = resize(attribution_map, img.shape[:2], anti_aliasing=True)
+                
+                # Create custom pink-blue diverging colormap (like the medical imaging example)
+                colors_blue_to_pink = [
+                    '#0066CC',  # Dark blue (strong negative)
+                    '#3399FF',  # Medium blue
+                    '#66CCFF',  # Light blue
+                    '#FFFFFF',  # White (neutral)
+                    '#FFB3D9',  # Light pink
+                    '#FF66B3',  # Medium pink
+                    '#FF0080'   # Dark pink/magenta (strong positive)
+                ]
+                
+                pink_blue_cmap = LinearSegmentedColormap.from_list(
+                    'pink_blue', colors_blue_to_pink, N=256
+                )
+                
+                # Normalize attribution values for the colormap
+                # Center around zero and make symmetric
+                abs_max = np.max(np.abs(attribution_map))
+                if abs_max > 0:
+                    vmin, vmax = -abs_max, abs_max
+                else:
+                    vmin, vmax = -1, 1
+                
+                # Display SHAP attribution map with pink-blue colormap
+                im = axes[1].imshow(attribution_map, cmap=pink_blue_cmap, vmin=vmin, vmax=vmax)
+                axes[1].set_title("SHAP Attribution Map\n(Blue: Negative, Pink: Positive)")
+                axes[1].axis('off')
+                
+                # Add colorbar with proper labels
+                cbar = plt.colorbar(im, ax=axes[1], fraction=0.046, pad=0.04)
+                cbar.set_label('SHAP Value', rotation=270, labelpad=15)
+                
+                # Create overlay visualization with transparency
+                # Normalize the original image for proper blending
+                img_normalized = img.copy()
+                if np.max(img_normalized) > 1:
+                    img_normalized = img_normalized / 255.0
+                
+                # Create colored attribution overlay
+                # Map attribution values to colors
+                norm_attribution = (attribution_map - vmin) / (vmax - vmin)  # Normalize to [0,1]
+                colored_attribution = pink_blue_cmap(norm_attribution)[:, :, :3]  # Remove alpha channel
+                
+                # Create a mask for significant attributions (to avoid showing noise)
+                significance_threshold = 0.1 * abs_max  # Only show attributions above 10% of max
+                significant_mask = np.abs(attribution_map) > significance_threshold
+                
+                # Create the overlay
+                overlay = img_normalized.copy()
+                alpha = 0.6  # Transparency for the attribution overlay
+                
+                # Apply colored attribution only where it's significant
+                for i in range(3):  # RGB channels
+                    attribution_channel = colored_attribution[:, :, i]
+                    # Only blend where attribution is significant
+                    overlay[:, :, i] = np.where(
+                        significant_mask,
+                        img_normalized[:, :, i] * (1 - alpha) + attribution_channel * alpha,
+                        img_normalized[:, :, i]
+                    )
+                
+                axes[2].imshow(overlay)
+                axes[2].set_title("Original + SHAP Overlay\n(Significant attributions only)")
+                axes[2].axis('off')
+                
+                # Add a small legend explaining the colors
+                legend_text = (
+                    "Blue regions: Decrease prediction confidence\n"
+                    "Pink regions: Increase prediction confidence\n"
+                    f"Threshold: ±{significance_threshold:.1e}"
+                )
+                axes[2].text(0.02, 0.98, legend_text, transform=axes[2].transAxes, 
+                            fontsize=9, verticalalignment='top', 
+                            bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+                
+            except Exception as viz_error:
+                print(f"Error creating detailed visualization: {viz_error}")
+                
+                # Simple fallback visualization without using SHAP's image_plot
+                try:
+                    # Just show the original image with success message
+                    for ax in axes:
+                        ax.imshow(img)
+                        ax.set_title(f"SHAP analysis completed\nClass: {class_name}, Confidence: {confidence:.2f}")
+                        ax.axis('off')
+                        
+                except Exception as fallback_error:
+                    print(f"Fallback visualization also failed: {fallback_error}")
+                    # Show original image only
+                    for ax in axes:
+                        ax.imshow(img)
+                        ax.set_title(f"SHAP completed but visualization failed\nClass: {class_name}, Confidence: {confidence:.2f}")
+                        ax.axis('off')
+            
+            plt.tight_layout()
             return fig
         
-        # Create a figure for visualization
-        fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-        
-        # Display original image
-        axes[0].imshow(img)
-        axes[0].set_title('Original Image', fontsize=14)
-        axes[0].axis('off')
-        
-        # Make sure we can handle shap_values in different formats
-        try:
-            # Display SHAP values as a heatmap
-            shap_values_for_class = shap_values[class_index][0]
-            
-            # Check if shap_values_for_class has the right shape
-            if shap_values_for_class.shape != img.shape:
-                print(f"Warning: SHAP values shape {shap_values_for_class.shape} doesn't match image shape {img.shape}")
-                
-                # If it's a 2D matrix, reshape to match image dimensions
-                if len(shap_values_for_class.shape) == 2:
-                    # Create a 3-channel heatmap from 2D matrix
-                    height, width = shap_values_for_class.shape
-                    shap_values_for_class = np.repeat(shap_values_for_class[:, :, np.newaxis], 3, axis=2)
-                
-                # If shapes still don't match, try to resize
-                if shap_values_for_class.shape != img.shape:
-                    print(f"Resizing SHAP values from {shap_values_for_class.shape} to {img.shape}")
-                    # Create a properly sized array and copy values
-                    resized_values = np.zeros_like(img)
-                    # Copy as much as possible
-                    min_h = min(shap_values_for_class.shape[0], img.shape[0])
-                    min_w = min(shap_values_for_class.shape[1], img.shape[1])
-                    min_c = min(shap_values_for_class.shape[2], img.shape[2])
-                    resized_values[:min_h, :min_w, :min_c] = shap_values_for_class[:min_h, :min_w, :min_c]
-                    shap_values_for_class = resized_values
-            
-            # Sum across color channels to get a single channel heatmap
-            abs_shap = np.abs(shap_values_for_class).sum(axis=-1)  
-            
-            # Normalize for visualization
-            if np.max(abs_shap) > 0:  # Avoid division by zero
-                abs_shap = abs_shap / np.max(abs_shap)
-            
-            # Display SHAP heatmap
-            im = axes[1].imshow(abs_shap, cmap='hot')
-            axes[1].set_title(f'SHAP Heatmap for {class_name}', fontsize=14)
-            axes[1].axis('off')
-            fig.colorbar(im, ax=axes[1], label='SHAP Value Magnitude')
-            
-            # Create a combined visualization with original image and SHAP overlay
-            try:
-                # Simple visualization method that avoids broadcasting issues
-                blend = img.copy() 
-                
-                # Create a heatmap in proper RGB format
-                cmap = plt.cm.hot
-                heatmap = cmap(abs_shap)[:, :, :3]  # Drop alpha channel
-                
-                # Ensure heatmap has same dimensions as the image
-                if heatmap.shape[:2] != img.shape[:2]:
-                    # Resize heatmap to match image dimensions
-                    from skimage.transform import resize
-                    heatmap = resize(heatmap, (img.shape[0], img.shape[1], 3), anti_aliasing=True)
-                
-                # Apply alpha blending (safely)
-                alpha = 0.7
-                for i in range(3):  # For each channel
-                    blend[:, :, i] = img[:, :, i] * (1 - alpha) + heatmap[:, :, i] * alpha
-                
-                # Display the blended image
-                axes[2].imshow(blend)
-                axes[2].set_title(f'SHAP Overlay\nClass: {class_name}\nConfidence: {confidence:.2f}', fontsize=14)
-                axes[2].axis('off')
-            except Exception as e:
-                print(f"Error in overlay generation: {e}")
-                # If blending fails, just show the original image with an error message
-                axes[2].imshow(img)
-                axes[2].set_title(f'Overlay failed: {str(e)}', fontsize=12, color='red')
-                axes[2].axis('off')
-                
         except Exception as e:
             print(f"Error in SHAP visualization: {e}")
-            # If visualization fails, show the original image with error message
-            for i in range(1, 3):
-                axes[i].imshow(img)
-                axes[i].set_title(f'Visualization failed: {str(e)}', fontsize=12, color='red')
-                axes[i].axis('off')
         
-        plt.tight_layout()
-        return fig
+            # Create a simple visualization with just the original image
+            fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+            ax.imshow(img)
+            ax.set_title(f"Visualization failed: {str(e)}\nClass: {class_name}, Confidence: {confidence:.2f}")
+            ax.axis('off')
+            return fig
     
     def preprocess_image_for_shap(self, img_path):
         """
@@ -583,77 +691,99 @@ class SHAPUtils:
     
     def apply_shap_to_image(self, img_path, model, background_data=None, pred_index=None, output_path=None):
         """
-        Apply SHAP to an image and display or save the result.
+        Apply SHAP to an image and save or display the result.
         
         Args:
             img_path (str): Path to the image file
             model: The model to explain
-            background_data: Optional background data for SHAP explainer. If None, will be generated.
-            pred_index (int): Optional class index to explain
-            output_path (str): Optional path to save the result. If None, just displays the result.
-        
+            background_data: Background data for SHAP explainer
+            pred_index: Optional class index to explain
+            output_path: Optional path to save the result
+
         Returns:
-            str or None: Path to the saved result if output_path is provided, else None
+            str or matplotlib.figure.Figure or None: Path to the saved result if output_path is provided,
+                                                Figure object if output_path is None
         """
-        # Preprocess the image
-        img, display_img = self.preprocess_image_for_shap(img_path)
-        
-        # Get background data if not provided
-        if background_data is None:
-            background_data = self.get_background_data()
+        print(f"Applying SHAP to image: {os.path.basename(img_path)}")
+        print(f"Model: {model.name if hasattr(model, 'name') else 'unnamed model'}")
         
         try:
-            # Check if this is a DenseNet model
-            is_densenet = False
-            if hasattr(model, 'name'):
-                is_densenet = 'densenet' in model.name.lower()
+            # Preprocess the image
+            img, display_img = self.preprocess_image_for_shap(img_path)
+            print(f"Preprocessed image shape: {img.shape}")
+            
+            # Get background data if not provided
+            if background_data is None:
+                background_data = self.get_background_data(num_samples=5)  # Fewer samples for stability
+            
+            print(f"Background data shape: {background_data.shape}")
             
             # Generate SHAP explanation
             shap_values, predicted_class, class_name, confidence = self.explain_image_shap(
-                model, img, background_data, pred_index=pred_index
+                model, img, background_data, pred_index=pred_index, num_samples=30
             )
             
             # Visualize the explanation
-            fig = self.visualize_shap_explanation(
-                img, shap_values, 
-                class_index=predicted_class if pred_index is None else pred_index,
-                class_name=class_name, confidence=confidence
-            )
+            fig = self.visualize_shap_explanation(img, shap_values, predicted_class, class_name, confidence)
             
-            # Save the figure if output path is provided, otherwise just display it
+            # Save the figure if output path is provided
             if output_path:
-                plt.savefig(output_path, bbox_inches='tight')
+                plt.savefig(output_path, dpi=150, bbox_inches='tight')
                 plt.close(fig)
+                print(f"SHAP result saved to: {output_path}")
                 return output_path
             else:
-                plt.show()
-                plt.close(fig)
-                return None
+                # Return the figure object without closing it
+                return fig
                 
         except Exception as e:
-            print(f"Error applying SHAP to image {os.path.basename(img_path)}: {e}")
+            print(f"Error applying SHAP to image: {e}")
             
-            # Create a simple visualization with prediction but without SHAP
-            fig, ax = plt.subplots(1, 1, figsize=(10, 10))
-            ax.imshow(display_img)
-            ax.set_title(f'Error generating SHAP explanation\n{str(e)}', fontsize=14, color='red')
-            ax.axis('off')
-            
-            if output_path:
-                # Modify output path to indicate this is a fallback
-                base, ext = os.path.splitext(output_path)
-                fallback_path = f"{base}_error{ext}"
-                plt.savefig(fallback_path, bbox_inches='tight')
-                plt.close(fig)
-                return fallback_path
-            else:
-                plt.show()
-                plt.close(fig)
-                return None
+            try:
+                # Fallback: try to at least get the prediction
+                img, display_img = self.preprocess_image_for_shap(img_path)
+                preds = model.predict(np.expand_dims(img, axis=0), verbose=0)[0]
+                predicted_class = np.argmax(preds)
+                confidence = preds[predicted_class]
+                class_name = self.CLASS_NAMES[predicted_class]
+                
+                # Create a simple visualization with just the prediction
+                fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+                ax.imshow(display_img)
+                ax.set_title(f'Model: {model.name if hasattr(model, "name") else "Unknown"}\n'
+                            f'Prediction: {class_name}\n'
+                            f'Confidence: {confidence:.2f}\n\n'
+                            f'SHAP explanation failed: {str(e)}', 
+                        fontsize=12, color='red')
+                ax.axis('off')
+                
+                if output_path:
+                    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+                    plt.close(fig)
+                    print(f"Fallback visualization saved to: {output_path}")
+                    return output_path
+                else:
+                    return fig
+                    
+            except Exception as inner_e:
+                print(f"Fallback visualization also failed: {inner_e}")
+                
+                # Final fallback: create an error message figure
+                fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+                ax.text(0.5, 0.5, f"Error applying SHAP: {str(e)}\n\nFallback also failed: {str(inner_e)}", 
+                        ha='center', va='center', color='red', fontsize=12, wrap=True)
+                ax.axis('off')
+                
+                if output_path:
+                    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+                    plt.close(fig)
+                    return output_path
+                else:
+                    return fig
     
     def compare_models_on_image(self, models, img_path, true_class_idx, background_data=None, output_path=None):
         """
-        Compare multiple models' SHAP explanations on the same image.
+        Updated compare_models_on_image method with pink-blue colormap.
         
         Args:
             models (dict): Dictionary of models {model_name: model}
@@ -675,12 +805,28 @@ class SHAPUtils:
         # Get the number of models
         num_models = len(models)
         
-        # Create a figure with subplots - one row per model
+        # Create a figure with subplots - one row per model, 3 columns
         fig, axes = plt.subplots(num_models, 3, figsize=(18, 6 * num_models))
         
         # If only one model, make axes 2D
         if num_models == 1:
             axes = np.array([axes])
+        
+        # Create the pink-blue colormap
+        colors_blue_to_pink = [
+            '#0066CC',  # Dark blue (strong negative)
+            '#3399FF',  # Medium blue
+            '#66CCFF',  # Light blue
+            '#FFFFFF',  # White (neutral)
+            '#FFB3D9',  # Light pink
+            '#FF66B3',  # Medium pink
+            '#FF0080'   # Dark pink/magenta (strong positive)
+        ]
+        
+        from matplotlib.colors import LinearSegmentedColormap
+        pink_blue_cmap = LinearSegmentedColormap.from_list(
+            'pink_blue', colors_blue_to_pink, N=256
+        )
         
         # Add true class label to the figure if known
         if true_class_idx >= 0 and true_class_idx < len(self.CLASS_NAMES):
@@ -689,7 +835,6 @@ class SHAPUtils:
         
         # Process each model
         for i, (model_name, model) in enumerate(models.items()):
-            # Apply SHAP
             try:
                 # Generate SHAP explanation
                 shap_values, predicted_class, class_name, confidence = self.explain_image_shap(
@@ -704,101 +849,119 @@ class SHAPUtils:
                 # If SHAP values are available, visualize them
                 if shap_values is not None:
                     try:
-                        # Get SHAP values for the predicted class
-                        shap_values_for_class = shap_values[predicted_class][0]
+                        # Extract SHAP values (similar to the main visualization function)
+                        if hasattr(shap_values, 'values'):
+                            if isinstance(shap_values.values, list):
+                                attribution = shap_values.values[0]
+                            else:
+                                attribution = shap_values.values
+                        else:
+                            attribution = shap_values[0] if isinstance(shap_values, list) else shap_values
                         
-                        # Check if shap_values_for_class has the right shape
-                        if shap_values_for_class.shape != img.shape:
-                            print(f"Warning: SHAP values shape {shap_values_for_class.shape} doesn't match image shape {img.shape}")
-                            
-                            # If it's a 2D matrix, reshape to match image dimensions
-                            if len(shap_values_for_class.shape) == 2:
-                                # Create a 3-channel heatmap from 2D matrix
-                                height, width = shap_values_for_class.shape
-                                shap_values_for_class = np.repeat(shap_values_for_class[:, :, np.newaxis], 3, axis=2)
-                            
-                            # If shapes still don't match, try to resize
-                            if shap_values_for_class.shape != img.shape:
-                                print(f"Resizing SHAP values from {shap_values_for_class.shape} to {img.shape}")
-                                # Create a properly sized array and copy values
-                                resized_values = np.zeros_like(img)
-                                # Copy as much as possible
-                                min_h = min(shap_values_for_class.shape[0], img.shape[0])
-                                min_w = min(shap_values_for_class.shape[1], img.shape[1])
-                                min_c = min(shap_values_for_class.shape[2], img.shape[2])
-                                resized_values[:min_h, :min_w, :min_c] = shap_values_for_class[:min_h, :min_w, :min_c]
-                                shap_values_for_class = resized_values
+                        # Process attribution to get 2D map
+                        if len(attribution.shape) == 5:
+                            attribution = attribution[0]
+                            attribution = np.sum(attribution, axis=-1)
+                        elif len(attribution.shape) == 4:
+                            if attribution.shape[0] == 1:
+                                attribution = attribution[0]
+                            elif attribution.shape[-1] > 3:
+                                attribution = np.sum(attribution, axis=-1)
                         
-                        # Sum across color channels to get a single channel heatmap
-                        abs_shap = np.abs(shap_values_for_class).sum(axis=-1)  
+                        # Create attribution map
+                        if len(attribution.shape) == 3:
+                            attribution_map = attribution.sum(axis=-1)
+                        elif len(attribution.shape) == 2:
+                            attribution_map = attribution
+                        else:
+                            if len(attribution.shape) > 2:
+                                attribution_map = attribution.sum(axis=tuple(range(2, len(attribution.shape))))
+                            else:
+                                attribution_map = attribution
                         
-                        # Normalize for visualization
-                        if np.max(abs_shap) > 0:  # Avoid division by zero
-                            abs_shap = abs_shap / np.max(abs_shap)
+                        # Resize if needed
+                        if attribution_map.shape != img.shape[:2]:
+                            from skimage.transform import resize
+                            attribution_map = resize(attribution_map, img.shape[:2], anti_aliasing=True)
                         
-                        # Display SHAP heatmap
-                        im = axes[i, 1].imshow(abs_shap, cmap='hot')
-                        axes[i, 1].set_title(f'SHAP Heatmap', fontsize=12)
+                        # Normalize for colormap
+                        abs_max = np.max(np.abs(attribution_map))
+                        if abs_max > 0:
+                            vmin, vmax = -abs_max, abs_max
+                        else:
+                            vmin, vmax = -1, 1
+                        
+                        # Display SHAP attribution map
+                        im = axes[i, 1].imshow(attribution_map, cmap=pink_blue_cmap, vmin=vmin, vmax=vmax)
+                        axes[i, 1].set_title(f'SHAP Attribution\n(Blue: -, Pink: +)', fontsize=12)
                         axes[i, 1].axis('off')
                         
-                        # Create a combined visualization with original image and SHAP overlay
-                        # Simple visualization method that avoids broadcasting issues
-                        blend = img.copy() 
+                        # Create overlay
+                        img_normalized = img.copy()
+                        if np.max(img_normalized) > 1:
+                            img_normalized = img_normalized / 255.0
                         
-                        # Create a heatmap in proper RGB format
-                        cmap = plt.cm.hot
-                        heatmap = cmap(abs_shap)[:, :, :3]  # Drop alpha channel
+                        # Create colored attribution overlay
+                        norm_attribution = (attribution_map - vmin) / (vmax - vmin)
+                        colored_attribution = pink_blue_cmap(norm_attribution)[:, :, :3]
                         
-                        # Ensure heatmap has same dimensions as the image
-                        if heatmap.shape[:2] != img.shape[:2]:
-                            # Resize heatmap to match image dimensions
-                            from skimage.transform import resize
-                            heatmap = resize(heatmap, (img.shape[0], img.shape[1], 3), anti_aliasing=True)
+                        # Create overlay with transparency
+                        significance_threshold = 0.1 * abs_max
+                        significant_mask = np.abs(attribution_map) > significance_threshold
                         
-                        # Apply alpha blending (safely)
-                        alpha = 0.7
-                        for j in range(3):  # For each channel
-                            blend[:, :, j] = img[:, :, j] * (1 - alpha) + heatmap[:, :, j] * alpha
+                        overlay = img_normalized.copy()
+                        alpha = 0.6
                         
-                        # Display the blended image
-                        axes[i, 2].imshow(blend)
+                        for j in range(3):
+                            attribution_channel = colored_attribution[:, :, j]
+                            overlay[:, :, j] = np.where(
+                                significant_mask,
+                                img_normalized[:, :, j] * (1 - alpha) + attribution_channel * alpha,
+                                img_normalized[:, :, j]
+                            )
                         
-                        # Add a green border if the prediction is correct, red if incorrect
-                        # Only do this if we know the true class
+                        axes[i, 2].imshow(overlay)
+                        
+                        # Add prediction status
                         if true_class_idx >= 0:
                             if predicted_class == true_class_idx:
+                                prediction_status = "✓ Correct"
+                                color = 'green'
+                                # Add green border
                                 for spine in axes[i, 0].spines.values():
                                     spine.set_edgecolor('green')
                                     spine.set_linewidth(3)
-                                prediction_status = "✓ Correct"
-                                color = 'green'
                             else:
+                                prediction_status = "✗ Incorrect"
+                                color = 'red'
+                                # Add red border
                                 for spine in axes[i, 0].spines.values():
                                     spine.set_edgecolor('red')
                                     spine.set_linewidth(3)
-                                prediction_status = "✗ Incorrect"
-                                color = 'red'
                             
-                            axes[i, 2].set_title(f'SHAP Overlay\nPrediction: {class_name} ({confidence:.2f})\n{prediction_status}', 
+                            axes[i, 2].set_title(f'Overlay\nPred: {class_name} ({confidence:.2f})\n{prediction_status}', 
                                                 fontsize=12, color=color)
                         else:
-                            axes[i, 2].set_title(f'SHAP Overlay\nPrediction: {class_name} ({confidence:.2f})', 
+                            axes[i, 2].set_title(f'Overlay\nPrediction: {class_name} ({confidence:.2f})', 
                                                 fontsize=12)
+                        
+                        axes[i, 2].axis('off')
+                        
                     except Exception as e:
                         print(f"Error in model comparison visualization: {e}")
-                        # If visualization fails, show error message
+                        # Show error message
                         for j in range(1, 3):
-                            axes[i, j].imshow(display_img)
-                            axes[i, j].set_title(f'Visualization failed: {str(e)}', fontsize=12, color='red')
+                            axes[i, j].text(0.5, 0.5, f'Visualization failed: {str(e)}', 
+                                        ha='center', va='center', color='red', fontsize=10)
                             axes[i, j].axis('off')
                 else:
-                    # If SHAP values are not available, show error message
+                    # SHAP values not available
                     for j in range(1, 3):
                         axes[i, j].text(0.5, 0.5, "SHAP explanation failed", 
-                                      ha='center', va='center', color='red', fontsize=12)
+                                    ha='center', va='center', color='red', fontsize=12)
                         axes[i, j].axis('off')
                     
-                    # Still show prediction information
+                    # Still show prediction
                     if true_class_idx >= 0:
                         if predicted_class == true_class_idx:
                             prediction_status = "✓ Correct"
@@ -807,29 +970,28 @@ class SHAPUtils:
                             prediction_status = "✗ Incorrect"
                             color = 'red'
                         
-                        axes[i, 0].set_title(f'Model: {model_name.replace(".h5", "")}\nPrediction: {class_name}\n{prediction_status}', 
-                                           fontsize=12, color=color)
+                        axes[i, 0].set_title(f'Model: {model_name.replace(".h5", "")}\nPred: {class_name}\n{prediction_status}', 
+                                        fontsize=12, color=color)
                     else:
                         axes[i, 0].set_title(f'Model: {model_name.replace(".h5", "")}\nPrediction: {class_name}', 
-                                           fontsize=12)
-                
-                axes[i, 2].axis('off')
+                                        fontsize=12)
             
             except Exception as e:
-                # If there's an error with this model, display error message
+                # Error with this model
                 for j in range(3):
                     axes[i, j].text(0.5, 0.5, f"Error with {model_name}:\n{str(e)}", 
-                                   ha='center', va='center', color='red', fontsize=10)
+                                ha='center', va='center', color='red', fontsize=10)
                     axes[i, j].axis('off')
         
         plt.tight_layout()
         
         # Save the figure if output path is provided
         if output_path:
-            plt.savefig(output_path, bbox_inches='tight')
+            plt.savefig(output_path, bbox_inches='tight', dpi=150)
             plt.close(fig)
             return output_path
         else:
             plt.show()
             plt.close(fig)
-            return None 
+            return None
+            

@@ -285,7 +285,7 @@ class LIMEUtils:
             print(f"Explaining class {explanation_class_idx} ({self.CLASS_NAMES[explanation_class_idx]}) instead of predicted class")
         
         # Generate segmentation for the image
-        segments = slic(img, n_segments=100, compactness=10, sigma=1, start_label=1)
+        segments = slic(img, n_segments=20, compactness=10, sigma=1, start_label=1)
         
         # Explicitly include the target class in top_labels
         # Also include the top predicted class(es)
@@ -318,55 +318,55 @@ class LIMEUtils:
         except Exception as e:
             print(f"First LIME approach failed: {e}. Trying alternative approach.")
             
-            # Second attempt - let LIME determine top labels
-            try:
-                explanation = self.explainer.explain_instance(
-                    img, 
-                    predict_fn,
-                    top_labels=5,  # Let LIME determine the top 5 labels
-                    hide_color=0, 
-                    num_features=num_features,
-                    num_samples=num_samples * 2,  # Use more samples for better results
-                    segmentation_fn=lambda x: segments
-                )
+            # # Second attempt - let LIME determine top labels
+            # try:
+            #     explanation = self.explainer.explain_instance(
+            #         img, 
+            #         predict_fn,
+            #         top_labels=5,  # Let LIME determine the top 5 labels
+            #         hide_color=0, 
+            #         num_features=num_features,
+            #         num_samples=num_samples * 2,  # Use more samples for better results
+            #         segmentation_fn=lambda x: segments
+            #     )
                 
-                # Store the top_labels in the explanation object for later use
-                # Check if any of the top labels match our class of interest
-                if hasattr(explanation, 'top_labels'):
-                    if explanation_class_idx not in explanation.top_labels:
-                        # If our class isn't in top_labels, we might need to change the explanation class
-                        # to one that LIME can explain
-                        if len(explanation.top_labels) > 0:
-                            # Use the first available label instead
-                            print(f"Target class {explanation_class_idx} not in LIME's top_labels. Using {explanation.top_labels[0]} instead.")
-                            explanation_class_idx = explanation.top_labels[0]
-                            # Note: We do NOT change predicted_class, only the class we're explaining
+            #     # Store the top_labels in the explanation object for later use
+            #     # Check if any of the top labels match our class of interest
+            #     if hasattr(explanation, 'top_labels'):
+            #         if explanation_class_idx not in explanation.top_labels:
+            #             # If our class isn't in top_labels, we might need to change the explanation class
+            #             # to one that LIME can explain
+            #             if len(explanation.top_labels) > 0:
+            #                 # Use the first available label instead
+            #                 print(f"Target class {explanation_class_idx} not in LIME's top_labels. Using {explanation.top_labels[0]} instead.")
+            #                 explanation_class_idx = explanation.top_labels[0]
+            #                 # Note: We do NOT change predicted_class, only the class we're explaining
             
-            except Exception as e2:
-                print(f"Second LIME approach also failed: {e2}. Creating a minimal explanation.")
+            # except Exception as e2:
+            #     print(f"Second LIME approach also failed: {e2}. Creating a minimal explanation.")
                 
-                # Create a minimal explanation with just basic information
-                # This won't have proper explanations but will allow the code to continue
-                from lime.lime_base import LimeBase
+            #     # Create a minimal explanation with just basic information
+            #     # This won't have proper explanations but will allow the code to continue
+            #     from lime.lime_base import LimeBase
                 
-                class MinimalExplanation:
-                    def __init__(self, segments, class_index):
-                        self.segments = segments
-                        self.class_index = class_index
+            #     class MinimalExplanation:
+            #         def __init__(self, segments, class_index):
+            #             self.segments = segments
+            #             self.class_index = class_index
                     
-                    def get_image_and_mask(self, label, positive_only=True, num_features=1, hide_rest=False):
-                        # Return a simple mask that highlights a few random segments
-                        mask = np.zeros_like(segments, dtype=bool)
-                        # Select a few random segments to highlight
-                        random_segments = np.random.choice(np.unique(segments), 
-                                                         size=min(5, len(np.unique(segments))), 
-                                                         replace=False)
-                        for seg in random_segments:
-                            mask = np.logical_or(mask, segments == seg)
-                        return img, mask
+            #         def get_image_and_mask(self, label, positive_only=True, num_features=1, hide_rest=False):
+            #             # Return a simple mask that highlights a few random segments
+            #             mask = np.zeros_like(segments, dtype=bool)
+            #             # Select a few random segments to highlight
+            #             random_segments = np.random.choice(np.unique(segments), 
+            #                                              size=min(5, len(np.unique(segments))), 
+            #                                              replace=False)
+            #             for seg in random_segments:
+            #                 mask = np.logical_or(mask, segments == seg)
+            #             return img, mask
                 
-                explanation = MinimalExplanation(segments, explanation_class_idx)
-                print("Created a minimal explanation with random segments.")
+            #     explanation = MinimalExplanation(segments, explanation_class_idx)
+            #     print("Created a minimal explanation with random segments.")
         
         # Always return the predicted class (not explanation class) for correctness checks
         return explanation, segments, predicted_class, class_name, confidence
